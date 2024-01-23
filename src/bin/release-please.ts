@@ -73,6 +73,8 @@ interface VersioningArgs {
   latestTagVersion?: string;
   latestTagSha?: string;
   latestTagName?: string;
+
+  includeAllReleases?: boolean;
 }
 
 interface ManifestConfigArgs {
@@ -350,6 +352,12 @@ function pullRequestStrategyOptions(yargs: yargs.Argv): yargs.Argv {
       describe: 'format in strftime format for updating dates',
       type: 'string',
     })
+    .option('include-all-releases', {
+      describe:
+        'Include release shas from all branches when determining latest release',
+      default: false,
+      type: 'boolean',
+    })
     .middleware(_argv => {
       const argv = _argv as CreatePullRequestArgs;
 
@@ -483,6 +491,7 @@ const createReleasePullRequestCommand: yargs.CommandModule<
           versionFile: argv.versionFile,
           includeComponentInTag: argv.monorepoTags,
           includeVInTag: argv.includeVInTags,
+          includeAllReleases: argv.includeAllReleases,
         },
         extractManifestOptions(argv),
         argv.path
@@ -501,7 +510,9 @@ const createReleasePullRequestCommand: yargs.CommandModule<
     }
 
     if (argv.dryRun) {
-      const pullRequests = await manifest.buildPullRequests();
+      const pullRequests = await manifest.buildPullRequests(
+        argv.includeAllReleases
+      );
       console.log(`Would open ${pullRequests.length} pull requests`);
       console.log('fork:', manifest.fork);
       for (const pullRequest of pullRequests) {
@@ -536,7 +547,9 @@ const createReleasePullRequestCommand: yargs.CommandModule<
         }
       }
     } else {
-      const pullRequestNumbers = await manifest.createPullRequests();
+      const pullRequestNumbers = await manifest.createPullRequests(
+        argv.includeAllReleases
+      );
       console.log(pullRequestNumbers);
     }
   },
