@@ -124,7 +124,8 @@ export interface ReleaserConfig {
   extraLabels?: string[];
   initialVersion?: string;
   dateFormat?: string;
-  includeAllReleases?: boolean;
+  considerAllBranches?: boolean;
+  shasToTag?: string;
 
   // Changelog options
   changelogSections?: ChangelogSection[];
@@ -188,6 +189,7 @@ interface ReleaserConfigJson {
   'initial-version'?: string;
   'exclude-paths'?: string[]; // manifest-only
   'date-format'?: string;
+  'consider-all-branches'?: boolean;
 }
 
 export interface ManifestOptions {
@@ -481,7 +483,8 @@ export class Manifest {
     targetBranch: string,
     config: ReleaserConfig,
     manifestOptions?: ManifestOptions,
-    path: string = ROOT_PROJECT_PATH
+    path: string = ROOT_PROJECT_PATH,
+    manifestFile?: string
   ): Promise<Manifest> {
     const repositoryConfig: RepositoryConfig = {};
     repositoryConfig[path] = config;
@@ -490,18 +493,27 @@ export class Manifest {
       ...config,
     });
     const component = await strategy.getBranchComponent();
-    const releasedVersions: ReleasedVersions = {};
-    const latestVersion = await latestReleaseVersion(
-      github,
-      targetBranch,
-      version => isPublishedVersion(strategy, version),
-      config,
-      component,
-      manifestOptions?.logger
-    );
-    if (latestVersion) {
-      releasedVersions[path] = latestVersion;
+    let releasedVersions: ReleasedVersions = {};
+    if (manifestFile) {
+      releasedVersions = await parseReleasedVersions(
+        github,
+        manifestFile,
+        targetBranch
+      );
+    } else {
+      const latestVersion = await latestReleaseVersion(
+        github,
+        targetBranch,
+        version => isPublishedVersion(strategy, version),
+        config,
+        component,
+        manifestOptions?.logger
+      );
+      if (latestVersion) {
+        releasedVersions[path] = latestVersion;
+      }
     }
+
     return new Manifest(
       github,
       targetBranch,
@@ -523,7 +535,7 @@ export class Manifest {
    * @returns {ReleasePullRequest[]} The candidate pull requests to open or update.
    */
   async buildPullRequests(
-    includeAllReleases = false
+    considerAllBranches = false
   ): Promise<ReleasePullRequest[]> {
     this.logger.info('Building pull requests');
     const pathsByComponent = await this.getPathsByComponent();
@@ -618,7 +630,9 @@ export class Manifest {
 
     const commits: Commit[] = [];
     const releasePullRequestsBySha: Record<string, PullRequest> = {};
-    if (includeAllReleases) {
+    // only consider commits across all branches when there has been a previous release
+    // otherwise, there would be nothing to compare against
+    if (considerAllBranches && Object.keys(releasesByPath).length > 0) {
       for (const path in releasesByPath) {
         const release = releasesByPath[path];
         this.logger.info(
@@ -954,10 +968,10 @@ export class Manifest {
    * @returns {PullRequest[]} Pull request numbers of release pull requests
    */
   async createPullRequests(
-    includeAllReleases = false
+    considerAllBranches = false
   ): Promise<(PullRequest | undefined)[]> {
     const candidatePullRequests = await this.buildPullRequests(
-      includeAllReleases
+      considerAllBranches
     );
     if (candidatePullRequests.length === 0) {
       return [];
@@ -1227,10 +1241,28 @@ export class Manifest {
         this.logger.debug(`type: ${config.releaseType}`);
         this.logger.debug(`targetBranch: ${this.targetBranch}`);
         const strategy = strategiesByPath[path];
+
+        const shasToTag = (config.shasToTag?.split(',') || []).reduce(
+          (memo: Map<number, string>, prNumAndSha: string) => {
+            const parts = prNumAndSha.split(':');
+            const prNumber = parts[0];
+            const sha = parts[1];
+
+            this.logger.info(`Using ${sha} as release for PR #${prNumber}`);
+            memo.set(parseInt(prNumber), sha);
+            return memo;
+          },
+          new Map<number, string>()
+        );
+
         const releases = await strategy.buildReleases(pullRequest, {
+          shasToTag,
           groupPullRequestTitlePattern: this.groupPullRequestTitlePattern,
         });
         for (const release of releases) {
+          this.logger.info(
+            `Tagging ${release.sha} as release for version ${release.tag.version}`
+          );
           candidateReleases.push({
             ...release,
             path,
@@ -1459,6 +1491,7 @@ function extractReleaserConfig(
     initialVersion: config['initial-version'],
     excludePaths: config['exclude-paths'],
     dateFormat: config['date-format'],
+    considerAllBranches: config['consider-all-branches'],
   };
 }
 
@@ -1667,7 +1700,7 @@ async function latestReleaseVersion(
 
   // no need to iterate recent commits when we know we're looking at
   // all previous releases
-  if (!config.includeAllReleases) {
+  if (!config.considerAllBranches) {
     // only look at the last 250 or so commits to find the latest tag - we
     // don't want to scan the entire repository history if this repo has never
     // been released
@@ -1742,7 +1775,7 @@ async function latestReleaseVersion(
 
     if (tagMatchesConfig(tagName, branchPrefix, config.includeComponentInTag)) {
       logger.debug(`found release for ${prefix}`, tagName.version);
-      if (!commitShas.has(release.sha) && !config.includeAllReleases) {
+      if (!commitShas.has(release.sha) && !config.considerAllBranches) {
         logger.debug(
           `SHA not found in recent commits to branch ${targetBranch}, skipping`
         );
